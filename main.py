@@ -125,6 +125,13 @@ def _init_db():
                 password_hash TEXT NOT NULL
             )
         """))
+        cur.execute(_q("""
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        """))
+        cur.execute(_q("INSERT OR IGNORE INTO settings (key, value) VALUES ('register_enabled', '1')"))
     else:
         cur.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -144,6 +151,13 @@ def _init_db():
                 password_hash TEXT NOT NULL
             )
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        """)
+        cur.execute(_q("INSERT OR IGNORE INTO settings (key, value) VALUES ('register_enabled', '1')"))
     cur.execute(_q("SELECT id FROM admin WHERE id = 1"))
     if cur.fetchone() is None:
         salt = secrets.token_bytes(16)
@@ -195,8 +209,23 @@ def _check_password(password: str):
         raise HTTPException(400, "密码长度至少 6 位")
 
 
+def _get_setting(key, default="1"):
+    try:
+        conn = _conn()
+        cur = _cur(conn)
+        row = cur.execute(_q("SELECT value FROM settings WHERE key = ?"), (key,)).fetchone()
+        conn.close()
+        if row is not None:
+            return row["value"] if isinstance(row, dict) else row[0]
+    except Exception:
+        pass
+    return default
+
+
 @app.post("/api/register")
 def register(body: RegisterBody):
+    if _get_setting("register_enabled", "1") != "1":
+        raise HTTPException(403, "注册已关闭，请联系管理员")
     _check_username(body.username)
     _check_password(body.password)
     username = body.username.strip()
@@ -301,6 +330,29 @@ def admin_set_status(uid: int, body: StatusBody, request: Request):
     if cur.rowcount == 0:
         raise HTTPException(404, "用户不存在")
     return {"ok": True}
+
+
+@app.get("/api/admin/settings")
+def admin_settings(request: Request):
+    _require_admin(request)
+    return {"ok": True, "register_enabled": _get_setting("register_enabled", "1") == "1"}
+
+
+class SettingsBody(BaseModel):
+    register_enabled: bool
+
+
+@app.post("/api/admin/settings")
+def admin_set_settings(body: SettingsBody, request: Request):
+    _require_admin(request)
+    conn = _conn()
+    cur = _cur(conn)
+    cur.execute(_q("INSERT INTO settings (key, value) VALUES ('register_enabled', ?) "
+                   "ON CONFLICT(key) DO UPDATE SET value = excluded.value"),
+                ("1" if body.register_enabled else "0",))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "register_enabled": body.register_enabled}
 
 
 @app.get("/api/health")
