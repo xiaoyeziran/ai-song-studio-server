@@ -47,6 +47,14 @@
   </div>
 
   <div class="card hidden" id="mainCard">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+      <div>
+        <div style="font-size:14px;font-weight:600">注册开关</div>
+        <div style="font-size:12px;color:#8a93a6;margin-top:4px">关闭后新用户无法注册（已注册用户不受影响）</div>
+      </div>
+      <button id="regToggle" class="toggle enable" onclick="toggleRegister()">...</button>
+    </div>
+    <hr style="border-color:#232936;margin:14px 0">
     <table>
       <thead><tr><th>ID</th><th>用户名</th><th>状态</th><th>注册时间</th><th style="width:110px">操作</th></tr></thead>
       <tbody id="userRows"></tbody>
@@ -106,6 +114,22 @@ async function loadUsers() {
   }
 }
 
+async function toggleRegister() {
+  const btn = document.getElementById('regToggle');
+  btn.disabled = true;
+  try {
+    const data = await api('/api/admin/settings', 'GET');
+    const next = !data.register_enabled;
+    const r = await api('/api/admin/settings', 'POST', {register_enabled: next});
+    btn.textContent = r.register_enabled ? '已开启' : '已关闭';
+    btn.className = 'toggle ' + (r.register_enabled ? 'enable' : 'disable');
+    document.getElementById('opMsg').textContent = '注册' + (r.register_enabled ? '已开启' : '已关闭');
+  } catch (e) {
+    document.getElementById('opMsg').textContent = e.message;
+  }
+  btn.disabled = false;
+}
+
 async function setStatus(uid, active, btn) {
   btn.disabled = true;
   try {
@@ -118,10 +142,16 @@ async function setStatus(uid, active, btn) {
   }
 }
 
-function showMain() {
+async function showMain() {
   document.getElementById('loginCard').classList.add('hidden');
   document.getElementById('mainCard').classList.remove('hidden');
   loadUsers();
+  try {
+    const data = await api('/api/admin/settings', 'GET');
+    const btn = document.getElementById('regToggle');
+    btn.textContent = data.register_enabled ? '已开启' : '已关闭';
+    btn.className = 'toggle ' + (data.register_enabled ? 'enable' : 'disable');
+  } catch (e) {}
 }
 
 function adminLogout() {
