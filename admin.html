@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI 歌曲工坊 · 管理后台</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:"Microsoft YaHei",system-ui,sans-serif; background:#0f1115; color:#e6e9ef; min-height:100vh; }
+  .wrap { max-width:900px; margin:0 auto; padding:40px 20px; }
+  h1 { font-size:22px; margin-bottom:6px; }
+  .sub { color:#8a93a6; font-size:13px; margin-bottom:28px; }
+  .card { background:#171a21; border:1px solid #262b36; border-radius:12px; padding:24px; }
+  .field { margin-bottom:16px; }
+  label { display:block; font-size:13px; color:#aab3c5; margin-bottom:6px; }
+  input[type=text], input[type=password] { width:100%; padding:10px 12px; border-radius:8px; border:1px solid #2c3342; background:#0f1115; color:#fff; font-size:14px; outline:none; }
+  input:focus { border-color:#4f7cff; }
+  button { cursor:pointer; border:none; border-radius:8px; padding:10px 22px; font-size:14px; background:#3a5bff; color:#fff; }
+  button:hover { background:#4f6dff; }
+  button.ghost { background:transparent; border:1px solid #333c4d; color:#aab3c5; }
+  .err { color:#ff6b6b; font-size:13px; margin-top:10px; min-height:18px; }
+  table { width:100%; border-collapse:collapse; margin-top:8px; font-size:14px; }
+  th, td { text-align:left; padding:12px 10px; border-bottom:1px solid #232936; }
+  th { color:#8a93a6; font-weight:500; font-size:13px; }
+  .badge { padding:3px 10px; border-radius:20px; font-size:12px; }
+  .on { background:#123a26; color:#4ade80; }
+  .off { background:#3a1a1a; color:#ff6b6b; }
+  .toggle { padding:5px 14px; font-size:13px; border-radius:6px; }
+  .toggle.enable { background:#14532d; color:#4ade80; border:1px solid #166534; }
+  .toggle.disable { background:#7f1d1d; color:#fca5a5; border:1px solid #991b1b; }
+  .empty { color:#5c6577; text-align:center; padding:30px; font-size:14px; }
+  #logout { margin-top:16px; }
+  .hidden { display:none; }
+  .msg { font-size:13px; color:#4ade80; min-height:18px; margin-top:8px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🎵 AI 歌曲工坊 · 管理后台</h1>
+  <div class="sub">查看注册用户，开启 / 关闭账号使用权限。默认管理员账号：admin（部署时请修改 ADMIN_PASSWORD 环境变量）</div>
+
+  <div class="card" id="loginCard">
+    <div class="field"><label>管理员账号</label><input type="text" id="adminUser" value="admin"></div>
+    <div class="field"><label>密码</label><input type="password" id="adminPass" placeholder="请输入管理员密码"></div>
+    <button onclick="adminLogin()">登录后台</button>
+    <div class="err" id="loginErr"></div>
+  </div>
+
+  <div class="card hidden" id="mainCard">
+    <table>
+      <thead><tr><th>ID</th><th>用户名</th><th>状态</th><th>注册时间</th><th style="width:110px">操作</th></tr></thead>
+      <tbody id="userRows"></tbody>
+    </table>
+    <div class="empty" id="emptyRow">暂无注册用户</div>
+    <div class="msg" id="opMsg"></div>
+    <button class="ghost" id="logout" onclick="adminLogout()">退出登录</button>
+  </div>
+</div>
+
+<script>
+let token = localStorage.getItem('as_admin_token') || '';
+
+function api(path, method, body) {
+  const headers = {'Content-Type': 'application/json'};
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  return fetch(path, {method, headers, body: body ? JSON.stringify(body) : undefined})
+    .then(async r => {
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.detail || ('请求失败 ' + r.status));
+      return data;
+    });
+}
+
+async function adminLogin() {
+  const u = document.getElementById('adminUser').value.trim();
+  const p = document.getElementById('adminPass').value;
+  try {
+    const data = await api('/api/admin/login', 'POST', {username: u, password: p});
+    token = data.token;
+    localStorage.setItem('as_admin_token', token);
+    document.getElementById('loginErr').textContent = '';
+    showMain();
+  } catch (e) {
+    document.getElementById('loginErr').textContent = e.message;
+  }
+}
+
+async function loadUsers() {
+  try {
+    const data = await api('/api/admin/users', 'GET');
+    const tbody = document.getElementById('userRows');
+    tbody.innerHTML = '';
+    document.getElementById('emptyRow').style.display = data.users.length ? 'none' : 'block';
+    data.users.forEach(u => {
+      const tr = document.createElement('tr');
+      const on = !!u.active;
+      tr.innerHTML = `<td>${u.id}</td><td>${u.username}</td>
+        <td><span class="badge ${on ? 'on' : 'off'}">${on ? '已启用' : '已禁用'}</span></td>
+        <td>${(u.created_at || '').replace('T', ' ').slice(0, 19)}</td>
+        <td><button class="toggle ${on ? 'disable' : 'enable'}" onclick="setStatus(${u.id}, ${on ? 0 : 1}, this)">${on ? '禁用' : '启用'}</button></td>`;
+      tbody.appendChild(tr);
+    });
+  } catch (e) {
+    document.getElementById('opMsg').textContent = e.message;
+    if (e.message.includes('权限')) adminLogout();
+  }
+}
+
+async function setStatus(uid, active, btn) {
+  btn.disabled = true;
+  try {
+    await api('/api/admin/users/' + uid + '/status', 'POST', {active: !!active});
+    document.getElementById('opMsg').textContent = '操作成功';
+    loadUsers();
+  } catch (e) {
+    document.getElementById('opMsg').textContent = e.message;
+    btn.disabled = false;
+  }
+}
+
+function showMain() {
+  document.getElementById('loginCard').classList.add('hidden');
+  document.getElementById('mainCard').classList.remove('hidden');
+  loadUsers();
+}
+
+function adminLogout() {
+  token = '';
+  localStorage.removeItem('as_admin_token');
+  document.getElementById('mainCard').classList.add('hidden');
+  document.getElementById('loginCard').classList.remove('hidden');
+}
+
+if (token) { showMain(); }
+</script>
+</body>
+</html>
