@@ -2,24 +2,33 @@
 """
 AI 歌曲工坊 - 后端服务
 提供:用户注册 / 登录 / 账号状态校验 / 管理员后台(启用·禁用账号)
-运行: uvicorn main:app --host 0.0.0.0 --port 8000
+数据库:自动适配 —— 设置 DATABASE_URL 时使用 PostgreSQL(Replit 等云平台),否则使用 SQLite(本地/EXE 测试)
+运行: uvicorn main:app --host 0.0.0.0 --port 8000   (或 python main.py, 自动读 PORT 环境变量)
 """
 import os
 import hmac
 import hashlib
 import base64
 import json
-import sqlite3
 import secrets
 import time
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("DB_PATH", os.path.join(BASE_DIR, "server.db"))
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+PG = bool(DATABASE_URL)
+
+if PG:
+    import psycopg2
+    import psycopg2.extras
+else:
+    import sqlite3
+
 SECRET_FILE = os.path.join(BASE_DIR, "server_secret.key")
 # 新注册用户默认是否可直接使用: 1=注册即用, 0=需管理员在后台开启
 NEW_USER_ACTIVE = os.environ.get("NEW_USER_ACTIVE", "1") == "1"
@@ -31,12 +40,19 @@ app = FastAPI(title="AI 歌曲工坊后端")
 
 
 def _load_secret() -> bytes:
+    # 优先使用环境变量(云平台重启后仍有效), 否则回退到本地文件(仅本地/SQLite 模式)
+    env = os.environ.get("APP_SECRET", "")
+    if env:
+        return env.encode("utf-8")
     if os.path.exists(SECRET_FILE):
         with open(SECRET_FILE, "rb") as f:
             return f.read().strip()
     secret = secrets.token_bytes(32)
-    with open(SECRET_FILE, "wb") as f:
-        f.write(secret)
+    try:
+        with open(SECRET_FILE, "wb") as f:
+            f.write(secret)
+    except Exception:
+        pass
     return secret
 
 
@@ -44,9 +60,22 @@ SECRET = _load_secret()
 
 
 def _conn():
+    if PG:
+        return psycopg2.connect(DATABASE_URL)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _cur(conn):
+    if PG:
+        return conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    return conn.cursor()
+
+
+def _q(sql: str) -> str:
+    """PostgreSQL 使用 %s 占位符, SQLite 使用 ? """
+    return sql.replace("?", "%s") if PG else sql
 
 
 def _hash_password(password: str, salt: bytes) -> str:
@@ -76,29 +105,50 @@ def _verify_token(token: str):
 
 def _init_db():
     conn = _conn()
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            salt TEXT NOT NULL,
-            password_hash TEXT NOT NULL,
-            active INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS admin (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            username TEXT NOT NULL,
-            salt TEXT NOT NULL,
-            password_hash TEXT NOT NULL
-        )
-    """)
-    cur = conn.execute("SELECT id FROM admin WHERE id = 1")
+    cur = _cur(conn)
+    if PG:
+        cur.execute(_q("""
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                username VARCHAR(50) UNIQUE NOT NULL,
+                salt TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL
+            )
+        """))
+        cur.execute(_q("""
+            CREATE TABLE IF NOT EXISTS admin (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                username TEXT NOT NULL,
+                salt TEXT NOT NULL,
+                password_hash TEXT NOT NULL
+            )
+        """))
+    else:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                salt TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS admin (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                username TEXT NOT NULL,
+                salt TEXT NOT NULL,
+                password_hash TEXT NOT NULL
+            )
+        """)
+    cur.execute(_q("SELECT id FROM admin WHERE id = 1"))
     if cur.fetchone() is None:
         salt = secrets.token_bytes(16)
-        conn.execute(
-            "INSERT INTO admin (id, username, salt, password_hash) VALUES (1, ?, ?, ?)",
+        cur.execute(
+            _q("INSERT INTO admin (id, username, salt, password_hash) VALUES (1, ?, ?, ?)"),
             (ADMIN_USERNAME, base64.b64encode(salt).decode("ascii"),
              _hash_password(ADMIN_PASSWORD, salt)),
         )
@@ -111,7 +161,8 @@ _init_db()
 
 def _get_admin_row():
     conn = _conn()
-    row = conn.execute("SELECT * FROM admin WHERE id = 1").fetchone()
+    cur = _cur(conn)
+    row = cur.execute(_q("SELECT * FROM admin WHERE id = 1")).fetchone()
     conn.close()
     return row
 
@@ -150,17 +201,19 @@ def register(body: RegisterBody):
     _check_password(body.password)
     username = body.username.strip()
     conn = _conn()
+    cur = _cur(conn)
     try:
         salt = secrets.token_bytes(16)
-        conn.execute(
-            "INSERT INTO users (username, salt, password_hash, active, created_at) VALUES (?, ?, ?, ?, ?)",
+        cur.execute(
+            _q("INSERT INTO users (username, salt, password_hash, active, created_at) VALUES (?, ?, ?, ?, ?)"),
             (username, base64.b64encode(salt).decode("ascii"),
              _hash_password(body.password, salt),
              1 if NEW_USER_ACTIVE else 0,
              datetime.now(timezone.utc).isoformat()),
         )
         conn.commit()
-    except sqlite3.IntegrityError:
+    except Exception:
+        conn.rollback()
         conn.close()
         raise HTTPException(409, "用户名已存在")
     conn.close()
@@ -170,7 +223,8 @@ def register(body: RegisterBody):
 @app.post("/api/login")
 def login(body: LoginBody):
     conn = _conn()
-    row = conn.execute("SELECT * FROM users WHERE username = ?", (body.username.strip(),)).fetchone()
+    cur = _cur(conn)
+    row = cur.execute(_q("SELECT * FROM users WHERE username = ?"), (body.username.strip(),)).fetchone()
     conn.close()
     if row is None:
         raise HTTPException(401, "用户名或密码错误")
@@ -194,7 +248,8 @@ def me(request: Request):
     if not payload or payload.get("role") != "user":
         raise HTTPException(401, "登录状态无效，请重新登录")
     conn = _conn()
-    row = conn.execute("SELECT * FROM users WHERE id = ?", (payload["uid"],)).fetchone()
+    cur = _cur(conn)
+    row = cur.execute(_q("SELECT * FROM users WHERE id = ?"), (payload["uid"],)).fetchone()
     conn.close()
     if row is None:
         raise HTTPException(401, "账号不存在")
@@ -229,7 +284,8 @@ def _require_admin(request: Request):
 def admin_users(request: Request):
     _require_admin(request)
     conn = _conn()
-    rows = conn.execute("SELECT id, username, active, created_at FROM users ORDER BY id DESC").fetchall()
+    cur = _cur(conn)
+    rows = cur.execute(_q("SELECT id, username, active, created_at FROM users ORDER BY id DESC")).fetchall()
     conn.close()
     return {"ok": True, "users": [dict(r) for r in rows]}
 
@@ -238,7 +294,8 @@ def admin_users(request: Request):
 def admin_set_status(uid: int, body: StatusBody, request: Request):
     _require_admin(request)
     conn = _conn()
-    cur = conn.execute("UPDATE users SET active = ? WHERE id = ?", (1 if body.active else 0, uid))
+    cur = _cur(conn)
+    cur.execute(_q("UPDATE users SET active = ? WHERE id = ?"), (1 if body.active else 0, uid))
     conn.commit()
     conn.close()
     if cur.rowcount == 0:
